@@ -1,0 +1,8 @@
+Plank 1:
+  Leg_2: 75x80 at (0, 0)
+  Front_Support_1: 75x10 at (75, 0)
+  Leg_1: 75x80 at (150, 0)
+Plank 2:
+  Back_1: 180x75 at (0, 0) (Rotated)
+Plank 3:
+  Top_1: 180x80 at (0, 0)
