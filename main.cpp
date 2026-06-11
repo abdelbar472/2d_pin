@@ -9,16 +9,18 @@
 #include <numeric>
 #include <limits>
 #include <chrono>
+#include <unordered_set>
+#include <sstream>
 
 // Default plank size
 const int PLANK_LENGTH = 240;
 const int PLANK_WIDTH = 120;
 
 struct Item {
-    int length, width, quantity;
+    int length, width, quantity, id;
     std::string name;
-    Item() : length(0), width(0), quantity(0), name("") {}
-    Item(int l, int w, int q, const std::string& n) : length(l), width(w), quantity(q), name(n) {}
+    Item() : length(0), width(0), quantity(0), id(-1), name("") {}
+    Item(int l, int w, int q, const std::string& n, int i = -1) : length(l), width(w), quantity(q), id(i), name(n) {}
 };
 
 struct Plank {
@@ -60,25 +62,11 @@ struct Plank {
     }
 };
 
-// Optimized greedy packing with larger step size for faster execution
-std::vector<Plank> greedy_packing(const std::vector<Item>& items, int plank_length = PLANK_LENGTH, int plank_width = PLANK_WIDTH, int step = 5) {
+// Pack items in the exact order provided
+std::vector<Plank> pack_in_order(const std::vector<Item>& items, int plank_length = PLANK_LENGTH, int plank_width = PLANK_WIDTH, int step = 5) {
     std::vector<Plank> planks;
-    std::vector<Item> sorted_items;
 
-    // Expand items by quantity
     for (const auto& item : items) {
-        for (int i = 0; i < item.quantity; ++i) {
-            sorted_items.emplace_back(item.length, item.width, 1, item.name + "_" + std::to_string(i+1));
-        }
-    }
-
-    // Sort by area (largest first)
-    std::sort(sorted_items.begin(), sorted_items.end(),
-              [](const Item& a, const Item& b) {
-                  return (a.length * a.width) > (b.length * b.width);
-              });
-
-    for (const auto& item : sorted_items) {
         bool placed = false;
 
         // Try to place in existing planks
@@ -119,8 +107,29 @@ std::vector<Plank> greedy_packing(const std::vector<Item>& items, int plank_leng
     return planks;
 }
 
+// Optimized greedy packing baseline (Sorts by area: First Fit Decreasing)
+std::vector<Plank> greedy_packing(const std::vector<Item>& items, int plank_length = PLANK_LENGTH, int plank_width = PLANK_WIDTH, int step = 5) {
+    std::vector<Item> individual_items;
+
+    // Expand items by quantity
+    for (const auto& item : items) {
+        for (int i = 0; i < item.quantity; ++i) {
+            individual_items.emplace_back(item.length, item.width, 1, item.name + "_" + std::to_string(i+1));
+        }
+    }
+
+    // Sort by area (largest first)
+    std::sort(individual_items.begin(), individual_items.end(),
+              [](const Item& a, const Item& b) {
+                  return (a.length * a.width) > (b.length * b.width);
+              });
+
+    return pack_in_order(individual_items, plank_length, plank_width, step);
+}
+
 int fitness(const std::vector<Item>& order, int plank_length, int plank_width) {
-    return -static_cast<int>(greedy_packing(order, plank_length, plank_width, 10).size()); // Larger step for speed
+    // GA uses pack_in_order to evaluate the specific permutation
+    return -static_cast<int>(pack_in_order(order, plank_length, plank_width, 10).size()); // Larger step for speed
 }
 
 std::vector<Item> tournament_selection(const std::vector<std::vector<Item>>& population, int plank_length, int plank_width, int tournament_size = 3) {
@@ -142,18 +151,38 @@ std::vector<Item> tournament_selection(const std::vector<std::vector<Item>>& pop
 }
 
 std::vector<Item> crossover(const std::vector<Item>& p1, const std::vector<Item>& p2) {
-    static thread_local std::mt19937 gen(std::random_device{}());
     if (p1.empty()) return p2;
+    static thread_local std::mt19937 gen(std::random_device{}());
 
-    std::uniform_int_distribution<> dis(0, p1.size() - 1);
+    int n = p1.size();
+    std::uniform_int_distribution<> dis(0, n - 1);
     int start = dis(gen);
     int end = dis(gen);
     if (start > end) std::swap(start, end);
 
-    std::vector<Item> child = p1;
-    // Simple crossover - just swap a segment
-    for (int i = start; i <= end && i < p2.size(); ++i) {
-        child[i] = p2[i];
+    std::vector<Item> child(n);
+    std::unordered_set<int> in_child;
+
+    // Copy segment from p1
+    for (int i = start; i <= end; ++i) {
+        child[i] = p1[i];
+        in_child.insert(p1[i].id);
+    }
+
+    // Fill remaining from p2
+    int p2_idx = 0;
+    for (int i = 0; i < n; ++i) {
+        if (i >= start && i <= end) continue;
+
+        while (p2_idx < n && in_child.count(p2[p2_idx].id)) {
+            p2_idx++;
+        }
+
+        if (p2_idx < n) {
+            child[i] = p2[p2_idx];
+            in_child.insert(p2[p2_idx].id);
+            p2_idx++;
+        }
     }
     return child;
 }
@@ -179,20 +208,21 @@ void mutate(std::vector<Item>& order) {
     }
 }
 
-std::vector<Plank> genetic_algorithm(const std::vector<Item>& items, int plank_length = PLANK_LENGTH, int plank_width = PLANK_WIDTH, int pop_size = 20, int generations = 20, double mutation_rate = 0.1) {
+std::vector<Plank> genetic_algorithm(const std::vector<Item>& items, int plank_length = PLANK_LENGTH, int plank_width = PLANK_WIDTH, int pop_size = 50, int generations = 100, double mutation_rate = 0.15, bool quiet = false) {
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    std::cout << "Initializing GA (Pop: " << pop_size << ", Gen: " << generations << ")..." << std::endl;
+    if (!quiet) std::cout << "Initializing GA (Pop: " << pop_size << ", Gen: " << generations << ")..." << std::endl;
 
-    // Expand items
+    // Expand items and assign unique IDs for GA tracking
     std::vector<Item> base_items;
+    int unique_id = 0;
     for (const auto& item : items) {
         for (int i = 0; i < item.quantity; ++i) {
-            base_items.emplace_back(item.length, item.width, 1, item.name + "_" + std::to_string(i+1));
+            base_items.emplace_back(item.length, item.width, 1, item.name + "_" + std::to_string(i+1), unique_id++);
         }
     }
 
-    std::cout << "Total individual items: " << base_items.size() << std::endl;
+    if (!quiet) std::cout << "Total individual items: " << base_items.size() << std::endl;
 
     // Initialize population
     std::random_device rd;
@@ -206,7 +236,7 @@ std::vector<Plank> genetic_algorithm(const std::vector<Item>& items, int plank_l
     std::vector<Item> best_solution = population[0];
     int best_fitness = fitness(best_solution, plank_length, plank_width);
 
-    std::cout << "Initial best fitness: " << -best_fitness << " planks" << std::endl;
+    if (!quiet) std::cout << "Initial best fitness: " << -best_fitness << " planks" << std::endl;
 
     // Evolution
     for (int gen = 0; gen < generations; ++gen) {
@@ -243,7 +273,7 @@ std::vector<Plank> genetic_algorithm(const std::vector<Item>& items, int plank_l
         auto gen_end = std::chrono::high_resolution_clock::now();
         auto gen_time = std::chrono::duration_cast<std::chrono::milliseconds>(gen_end - gen_start);
 
-        if (gen % 5 == 0 || gen == generations - 1) {
+        if (!quiet && (gen % 5 == 0 || gen == generations - 1)) {
             std::cout << "Gen " << std::setw(2) << gen << ": " << -best_fitness
                       << " planks (" << gen_time.count() << "ms)" << std::endl;
         }
@@ -251,9 +281,9 @@ std::vector<Plank> genetic_algorithm(const std::vector<Item>& items, int plank_l
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto total_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    std::cout << "GA completed in " << total_time.count() << "ms" << std::endl;
+    if (!quiet) std::cout << "GA completed in " << total_time.count() << "ms" << std::endl;
 
-    return greedy_packing(best_solution, plank_length, plank_width);
+    return pack_in_order(best_solution, plank_length, plank_width);
 }
 
 void print_results(const std::vector<Plank>& planks, const std::string& method) {
@@ -277,7 +307,96 @@ void print_results(const std::vector<Plank>& planks, const std::string& method) 
               << (double)total_used/total_available*100 << "%" << std::endl;
 }
 
-int main() {
+void run_json_mode() {
+    std::string input_str;
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        input_str += line;
+    }
+
+    if (input_str.empty()) return;
+
+    // Simple manual JSON parsing for the expected format
+    // Format: {"algorithm": "...", "items": [{"name": "...", "length": 10, "width": 10, "quantity": 1}, ...]}
+
+    std::vector<Item> items;
+    std::string algorithm = "genetic";
+    int plank_l = PLANK_LENGTH;
+    int plank_w = PLANK_WIDTH;
+
+    // Extract algorithm
+    size_t alg_pos = input_str.find("\"algorithm\":");
+    if (alg_pos != std::string::npos) {
+        size_t start = input_str.find("\"", alg_pos + 12) + 1;
+        size_t end = input_str.find("\"", start);
+        algorithm = input_str.substr(start, end - start);
+    }
+
+    // Extract items
+    size_t items_pos = input_str.find("\"items\":");
+    if (items_pos != std::string::npos) {
+        size_t list_start = input_str.find("[", items_pos);
+        size_t list_end = input_str.find("]", list_start);
+        std::string items_list = input_str.substr(list_start + 1, list_end - list_start - 1);
+
+        size_t item_start = 0;
+        while ((item_start = items_list.find("{", item_start)) != std::string::npos) {
+            size_t item_end = items_list.find("}", item_start);
+            std::string item_obj = items_list.substr(item_start + 1, item_end - item_start - 1);
+
+            std::string name;
+            int l = 0, w = 0, q = 0;
+
+            size_t name_pos = item_obj.find("\"name\":");
+            if (name_pos != std::string::npos) {
+                size_t s = item_obj.find("\"", name_pos + 7) + 1;
+                size_t e = item_obj.find("\"", s);
+                name = item_obj.substr(s, e - s);
+            }
+
+            size_t l_pos = item_obj.find("\"length\":");
+            if (l_pos != std::string::npos) l = std::stoi(item_obj.substr(l_pos + 9));
+
+            size_t w_pos = item_obj.find("\"width\":");
+            if (w_pos != std::string::npos) w = std::stoi(item_obj.substr(w_pos + 8));
+
+            size_t q_pos = item_obj.find("\"quantity\":");
+            if (q_pos != std::string::npos) q = std::stoi(item_obj.substr(q_pos + 11));
+
+            items.emplace_back(l, w, q, name);
+            item_start = item_end + 1;
+        }
+    }
+
+    std::vector<Plank> result;
+    if (algorithm == "greedy") {
+        result = greedy_packing(items, plank_l, plank_w);
+    } else {
+        result = genetic_algorithm(items, plank_l, plank_w, 50, 100, 0.15, true);
+    }
+
+    // Output JSON result
+    std::cout << "{\"planks\": [";
+    for (size_t i = 0; i < result.size(); ++i) {
+        std::cout << "{\"dimensions\": {\"length\": " << result[i].length << ", \"width\": " << result[i].width << "}, \"items\": [";
+        for (size_t j = 0; j < result[i].items.size(); ++j) {
+            auto& item = result[i].items[j];
+            std::cout << "{\"position\": {\"x\": " << std::get<0>(item) << ", \"y\": " << std::get<1>(item) << "}, ";
+            std::cout << "\"size\": {\"length\": " << std::get<2>(item) << ", \"width\": " << std::get<3>(item) << "}, ";
+            std::cout << "\"name\": \"" << std::get<4>(item) << "\", \"rotated\": " << (std::get<5>(item) ? "true" : "false") << "}";
+            if (j < result[i].items.size() - 1) std::cout << ",";
+        }
+        std::cout << "]}";
+        if (i < result.size() - 1) std::cout << ",";
+    }
+    std::cout << "]}" << std::endl;
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--json") {
+        run_json_mode();
+        return 0;
+    }
     std::cout << "=== 2D Bin Packing Optimizer ===" << std::endl;
     std::cout << "System: Intel i5-6440HQ @ 2.60GHz, 16GB RAM" << std::endl;
     std::cout << "Plank size: " << PLANK_LENGTH << "x" << PLANK_WIDTH << " cm\n" << std::endl;
@@ -310,7 +429,7 @@ int main() {
         // Genetic algorithm
         std::cout << "\n--- Running Genetic Algorithm ---" << std::endl;
         start = std::chrono::high_resolution_clock::now();
-        auto ga_result = genetic_algorithm(items, PLANK_LENGTH, PLANK_WIDTH, 15, 15); // Reduced for speed
+        auto ga_result = genetic_algorithm(items, PLANK_LENGTH, PLANK_WIDTH, 50, 100);
         end = std::chrono::high_resolution_clock::now();
         auto ga_time = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 

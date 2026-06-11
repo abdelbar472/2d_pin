@@ -4,7 +4,7 @@ Enhanced 2D Bin Packing Optimizer with Python-C++ Integration
 Author: abdelbar472
 Date: 2025-09-02 06:26:39 UTC
 System: Intel i5-6440HQ @ 2.60GHz, 16GB RAM
-Location: D:\codes\2d_pin
+Location: D:\\codes\\2d_pin
 """
 
 import os
@@ -17,19 +17,120 @@ import tempfile
 from pathlib import Path
 import argparse
 from typing import List, Tuple, Optional, Dict, Any, Union
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.animation import FuncAnimation
-import numpy as np
-from tqdm import tqdm
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+    from matplotlib.animation import FuncAnimation
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
 import random
 import math
 from copy import deepcopy
-import psutil
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
 import platform
 
-# Import original classes from pin.py
-from pin import Item, Plank, greedy_packing, genetic_algorithm, simulated_annealing, visualize_planks, save_layout
+# Define Item and Plank classes previously missing
+class Item:
+    def __init__(self, length, width, quantity, name):
+        self.length = length
+        self.width = width
+        self.quantity = quantity
+        self.name = name
+
+    def __str__(self):
+        return f"{self.name}: {self.length}x{self.width} (qty: {self.quantity})"
+
+    @staticmethod
+    def from_dict(d):
+        return Item(d['length'], d['width'], d['quantity'], d['name'])
+
+class Plank:
+    def __init__(self, length, width):
+        self.length = length
+        self.width = width
+        self.items = [] # List of (x, y, l, w, name, rotated)
+
+    def get_used_area(self):
+        return sum(item[2] * item[3] for item in self.items)
+
+    def get_efficiency(self):
+        return (self.get_used_area() / (self.length * self.width)) * 100
+
+    def to_dict(self):
+        return {
+            "dimensions": {"length": self.length, "width": self.width},
+            "items": [
+                {
+                    "position": {"x": item[0], "y": item[1]},
+                    "size": {"length": item[2], "width": item[3]},
+                    "name": item[4],
+                    "rotated": item[5]
+                }
+                for item in self.items
+            ]
+        }
+
+def visualize_planks(planks, title):
+    if not HAS_MATPLOTLIB:
+        print("⚠️  Matplotlib not found. Skipping visualization.")
+        return
+    if not planks:
+        return
+    fig, axes = plt.subplots(len(planks), 1, figsize=(10, 5 * len(planks)))
+    if len(planks) == 1:
+        axes = [axes]
+
+    for i, (ax, plank) in enumerate(zip(axes, planks)):
+        ax.set_xlim(0, plank.length)
+        ax.set_ylim(0, plank.width)
+        ax.set_aspect('equal')
+        ax.set_title(f"{title} - Plank {i+1}")
+
+        # Plank boundary
+        ax.add_patch(patches.Rectangle((0, 0), plank.length, plank.width, fill=False, edgecolor='black', linewidth=2))
+
+        for x, y, l, w, name, rotated in plank.items:
+            color = plt.cm.tab20(hash(name) % 20)
+            ax.add_patch(patches.Rectangle((x, y), l, w, facecolor=color, alpha=0.5, edgecolor='black'))
+            ax.text(x + l/2, y + w/2, name, ha='center', va='center', fontsize=8)
+
+    plt.tight_layout()
+    plt.show()
+
+def save_layout(planks, filename):
+    with open(filename, 'w') as f:
+        for i, plank in enumerate(planks, 1):
+            f.write(f"Plank {i}:\n")
+            for x, y, l, w, name, rotated in plank.items:
+                f.write(f"  {name}: {l}x{w} at ({x}, {y}){' (Rotated)' if rotated else ''}\n")
+
+# Mock Python implementations for fallback
+def greedy_packing(items, length, width, step=1):
+    print("Python greedy_packing is a mock. Use C++ for real results.")
+    return []
+
+def genetic_algorithm(items, length, width, pop_size, generations, mutation_rate):
+    print("Python genetic_algorithm is a mock. Use C++ for real results.")
+    return []
+
+def simulated_annealing(items, length, width, initial_temp, cooling_rate, iterations):
+    print("Python simulated_annealing is a mock. Use C++ for real results.")
+    return []
 
 class SystemInfo:
     """System information and optimization detection."""
@@ -41,9 +142,9 @@ class SystemInfo:
             "platform": platform.system(),
             "architecture": platform.machine(),
             "processor": platform.processor(),
-            "cpu_count": psutil.cpu_count(logical=False),
-            "cpu_count_logical": psutil.cpu_count(logical=True),
-            "memory_gb": round(psutil.virtual_memory().total / (1024**3), 2),
+            "cpu_count": psutil.cpu_count(logical=False) if HAS_PSUTIL else 0,
+            "cpu_count_logical": psutil.cpu_count(logical=True) if HAS_PSUTIL else 0,
+            "memory_gb": round(psutil.virtual_memory().total / (1024**3), 2) if HAS_PSUTIL else 0,
             "python_version": platform.python_version()
         }
         return info
@@ -53,7 +154,7 @@ class SystemInfo:
         """Detect available optimizations."""
         optimizations = {
             "multiprocessing": True,
-            "numpy_available": True,
+            "numpy_available": HAS_NUMPY,
             "cpp_compiler": False,
             "openmp": False
         }
@@ -107,6 +208,7 @@ class PerformanceMonitor:
     
     def _monitor_resources(self):
         """Background thread to monitor system resources."""
+        if not HAS_PSUTIL: return
         while getattr(self, 'monitoring', False):
             try:
                 self.memory_usage.append(psutil.virtual_memory().percent)
@@ -130,14 +232,16 @@ class PerformanceMonitor:
     
     def get_stats(self) -> Dict[str, Any]:
         """Get comprehensive performance statistics."""
+        def mean(l): return sum(l)/len(l) if l else 0
+        def maximum(l): return max(l) if l else 0
         return {
             "duration": self.get_duration(),
             "iterations": self.current_iteration,
-            "avg_memory_usage": np.mean(self.memory_usage) if self.memory_usage else 0,
-            "max_memory_usage": np.max(self.memory_usage) if self.memory_usage else 0,
-            "avg_cpu_usage": np.mean(self.cpu_usage) if self.cpu_usage else 0,
-            "max_cpu_usage": np.max(self.cpu_usage) if self.cpu_usage else 0,
-            "avg_iteration_time": np.mean(self.iteration_times) if self.iteration_times else 0,
+            "avg_memory_usage": mean(self.memory_usage),
+            "max_memory_usage": maximum(self.memory_usage),
+            "avg_cpu_usage": mean(self.cpu_usage),
+            "max_cpu_usage": maximum(self.cpu_usage),
+            "avg_iteration_time": mean(self.iteration_times),
             "best_final_score": self.best_scores[-1] if self.best_scores else 0,
             "convergence_rate": self._calculate_convergence_rate()
         }
@@ -261,7 +365,7 @@ class CppExecutor:
                 temp_input = f.name
             
             # Run executable
-            cmd = [str(self.exe_path)]
+            cmd = ["./" + str(self.exe_path), "--json"]
             result = subprocess.run(
                 cmd,
                 input=json.dumps(input_data),
@@ -637,6 +741,9 @@ class HybridOptimizer:
     
     def create_enhanced_visualization(self, results: Dict[str, Tuple[List[Plank], Dict[str, Any]]]):
         """Create enhanced visualization with multiple views."""
+        if not HAS_MATPLOTLIB:
+            print("⚠️  Matplotlib not found. Skipping enhanced visualization.")
+            return
         if not results:
             return
         
@@ -650,7 +757,7 @@ class HybridOptimizer:
         planks_counts = [len(results[alg][0]) for alg in algorithms]
         execution_times = [results[alg][1]['execution_time'] for alg in algorithms]
         
-        x_pos = np.arange(len(algorithms))
+        x_pos = list(range(len(algorithms)))
         bars = ax1.bar(x_pos, planks_counts, color=['#FF6B6B', '#4ECDC4', '#45B7D1'])
         ax1.set_xlabel('Algorithm')
         ax1.set_ylabel('Planks Used')
@@ -689,9 +796,9 @@ class HybridOptimizer:
             
             values = [alg_eff, pack_eff, min(speed_eff, 100), mem_eff]
             
-            angles = np.linspace(0, 2 * np.pi, len(metrics_names), endpoint=False)
+            angles = [i * 2 * math.pi / len(metrics_names) for i in range(len(metrics_names))]
             values += values[:1]  # Complete the circle
-            angles = np.concatenate((angles, [angles[0]]))
+            angles.append(angles[0])
             
             colors = ['#FF6B6B', '#4ECDC4', '#45B7D1']
             ax3.plot(angles, values, 'o-', linewidth=2, label=algorithm.title(), color=colors[i])
@@ -885,7 +992,7 @@ Examples:
         print(f"📅 Date: 2025-09-02 06:26:39 UTC")
         print(f"👤 Author: abdelbar472") 
         print(f"💻 System: Intel i5-6440HQ @ 2.60GHz")
-        print(f"📂 Location: D:\\codes\\2d_pin")
+        print(f"📂 Location: D:\\\\codes\\\\2d_pin")
         print("🚀" * 25)
     
     # Load configuration
